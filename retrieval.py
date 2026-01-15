@@ -12,11 +12,18 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 
 class Embedder:
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self.model = SentenceTransformer(model_name)
+    _model = None
 
-    def embed(self, texts: List[str]) -> np.ndarray:
-        return np.array(self.model.encode(texts, normalize_embeddings=True))
+    def _load(self):
+        if self._model is None:
+            self._model = SentenceTransformer(
+                "all-MiniLM-L6-v2",
+                device="cpu"
+            )
+
+    def embed(self, texts: list[str]):
+        self._load()
+        return self._model.encode(texts, convert_to_numpy=True)
 
 
 def save_index(vectors: np.ndarray, meta: List[Dict], name: str):
