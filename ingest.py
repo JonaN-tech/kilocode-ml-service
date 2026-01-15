@@ -3,19 +3,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
-import pandas as pd
+from openpyxl import load_workbook
 from pypdf import PdfReader
 
 
 @dataclass
 class CommentRecord:
     comment_text: str
-    post_url: str | None = None
-    comment_url: str | None = None
-    posted_from: str | None = None
-    feedback: str | None = None
+    post_url: Optional[str] = None
+    comment_url: Optional[str] = None
+    posted_from: Optional[str] = None
+    feedback: Optional[str] = None
 
 
 def _clean_text(s: str) -> str:
@@ -26,21 +26,31 @@ def _clean_text(s: str) -> str:
 
 
 def load_comments_from_xlsx(xlsx_path: Path) -> List[CommentRecord]:
-    df = pd.read_excel(xlsx_path)
+    wb = load_workbook(filename=xlsx_path, read_only=True)
+    sheet = wb.active
 
-    def safe_str(x) -> str:
-        return "" if pd.isna(x) else str(x)
+    # Read header row
+    headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
+    header_index = {h: i for i, h in enumerate(headers)}
+
+    def safe_cell(row, name: str) -> str:
+        idx = header_index.get(name)
+        if idx is None:
+            return ""
+        value = row[idx]
+        return "" if value is None else str(value).strip()
 
     out: List[CommentRecord] = []
-    for _, row in df.iterrows():
-        mention = _clean_text(safe_str(row.get("Mention text")))
+
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        mention = _clean_text(safe_cell(row, "Mention text"))
         if not mention:
             continue
 
-        post_url = safe_str(row.get("Reddit Thread")).strip() or None
-        comment_url = safe_str(row.get("Link to the mention")).strip() or None
-        posted_from = safe_str(row.get("Posted from account")).strip() or None
-        feedback = safe_str(row.get("Feedback from Darko")).strip() or None
+        post_url = safe_cell(row, "Reddit Thread") or None
+        comment_url = safe_cell(row, "Link to the mention") or None
+        posted_from = safe_cell(row, "Posted from account") or None
+        feedback = safe_cell(row, "Feedback from Darko") or None
 
         if post_url and not post_url.startswith("http"):
             post_url = None
@@ -57,8 +67,10 @@ def load_comments_from_xlsx(xlsx_path: Path) -> List[CommentRecord]:
             )
         )
 
+    # Deduplicate by normalized comment text
     seen = set()
     deduped: List[CommentRecord] = []
+
     for r in out:
         key = re.sub(r"\s+", " ", r.comment_text).strip().lower()
         if key in seen:
