@@ -1,16 +1,15 @@
-from pathlib import Path
 from typing import List, Dict
-
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from retrieval import Embedder, load_index, search, load_jsonl
-
-BASE = Path(__file__).resolve().parent
-INDEXES = BASE / "indexes"
+from retrieval import Embedder, load_index, search
 
 app = FastAPI(title="KiloCode ML Context Service")
 
+
+# =========================
+# Request / Response Models
+# =========================
 
 class ContextRequest(BaseModel):
     post_text: str
@@ -23,27 +22,53 @@ class ContextResponse(BaseModel):
     doc_facts: List[Dict]
 
 
+# =========================
+# Startup (load models + data)
+# =========================
+
 @app.on_event("startup")
 def startup():
-    global embedder, style_index, docs_index, style_meta, docs_meta
-    embedder = Embedder()
-    style_index = load_index(INDEXES / "style.faiss")
-    docs_index = load_index(INDEXES / "docs.faiss")
-    style_meta = load_jsonl(INDEXES / "style_meta.jsonl")
-    docs_meta = load_jsonl(INDEXES / "docs_meta.jsonl")
+    global embedder
+    global comment_vectors, comment_meta
+    global doc_vectors, doc_meta
 
+    embedder = Embedder()
+
+    # Load prebuilt indexes (npy + json)
+    comment_vectors, comment_meta = load_index("comments")
+    doc_vectors, doc_meta = load_index("docs")
+
+
+# =========================
+# API Endpoint
+# =========================
 
 @app.post("/ml/context", response_model=ContextResponse)
 def get_context(req: ContextRequest):
-    q = embedder.embed([req.post_text])[0]
-
     style_examples = []
+    doc_facts = []
+
+    # -------- Style examples (past comments)
     if req.top_k_style > 0:
-        scores, idxs = search(style_index, q, req.top_k_style)
-        for s, i in zip(scores, idxs):
-            style_examples.append({**style_meta[int(i)], "score": float(s)})
+        style_examples = search(
+            query=req.post_text,
+            vectors=comment_vectors,
+            meta=comment_meta,
+            embedder=embedder,
+            top_k=req.top_k_style,
+        )
 
-    scores, idxs = search(docs_index, q, req.top_k_docs)
-    doc_facts = [{**docs_meta[int(i)], "score": float(s)} for s, i in zip(scores, idxs)]
+    # -------- Documentation facts
+    if req.top_k_docs > 0:
+        doc_facts = search(
+            query=req.post_text,
+            vectors=doc_vectors,
+            meta=doc_meta,
+            embedder=embedder,
+            top_k=req.top_k_docs,
+        )
 
-    return ContextResponse(style_examples=style_examples, doc_facts=doc_facts)
+    return ContextResponse(
+        style_examples=style_examples,
+        doc_facts=doc_facts,
+    )
