@@ -2,58 +2,50 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict
 
-import faiss
 import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
 
 class Embedder:
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model = SentenceTransformer(model_name)
 
     def embed(self, texts: List[str]) -> np.ndarray:
-        vecs = self.model.encode(
-            texts, normalize_embeddings=True, convert_to_numpy=True
-        )
-        return vecs.astype("float32")
+        return np.array(self.model.encode(texts, normalize_embeddings=True))
 
 
-def build_faiss_index(vectors: np.ndarray) -> faiss.Index:
-    dim = vectors.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(vectors)
-    return index
+def save_index(vectors: np.ndarray, meta: List[Dict], name: str):
+    np.save(DATA_DIR / f"{name}_vectors.npy", vectors)
+    with open(DATA_DIR / f"{name}_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
-def search(index: faiss.Index, query_vec: np.ndarray, top_k: int = 5):
-    if query_vec.ndim == 1:
-        query_vec = query_vec.reshape(1, -1)
-    scores, idxs = index.search(query_vec.astype("float32"), top_k)
-    return scores[0], idxs[0]
+def load_index(name: str):
+    vectors = np.load(DATA_DIR / f"{name}_vectors.npy")
+    with open(DATA_DIR / f"{name}_meta.json", "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    return vectors, meta
 
 
-def save_index(index: faiss.Index, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(index, str(path))
+def search(query: str, vectors: np.ndarray, meta: List[Dict], embedder: Embedder, top_k: int = 5):
+    q_vec = embedder.embed([query])
+    scores = cosine_similarity(q_vec, vectors)[0]
 
+    ranked = sorted(
+        zip(scores, meta),
+        key=lambda x: x[0],
+        reverse=True
+    )[:top_k]
 
-def load_index(path: Path) -> faiss.Index:
-    return faiss.read_index(str(path))
-
-
-def save_jsonl(records: List[Dict[str, Any]], path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-
-def load_jsonl(path: Path) -> List[Dict[str, Any]]:
-    out = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                out.append(json.loads(line))
-    return out
+    return [
+        {
+            "score": float(score),
+            **item
+        }
+        for score, item in ranked
+    ]
