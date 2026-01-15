@@ -1,7 +1,13 @@
 fastapi
 uvicorn
-pandas
+
+sentence-transformers==5.2.0
+torch==2.1.2
+
 numpy
+scipy
 scikit-learn
+pandas
+
 pypdf
 openpyxl
