@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: kilocode-ml-service
+    env: python
+    runtime: python
+    buildCommand: pip install -r requirements.txt && python build_indexes.py
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
