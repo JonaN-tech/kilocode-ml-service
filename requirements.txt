@@ -2,7 +2,7 @@ fastapi
 uvicorn
 
 sentence-transformers==5.2.0
-torch==2.1.2
+torch==2.5.0
 
 numpy
 scipy
