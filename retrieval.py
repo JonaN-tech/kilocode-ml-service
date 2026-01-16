@@ -17,7 +17,7 @@ class Embedder:
     def _load(self):
         if self._model is None:
             self._model = SentenceTransformer(
-                "all-MiniLM-L6-v2",
+                "all-MiniLM-L12-v2",
                 device="cpu"
             )
 
