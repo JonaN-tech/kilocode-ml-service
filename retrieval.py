@@ -39,7 +39,12 @@ def load_index(name: str):
     return vectors, meta
 
 
-def search(query: str, vectors: np.ndarray, meta: List[Dict], embedder: Embedder, top_k: int = 5):
+# retrieval.py
+def search_by_name(query: str, index_name: str, embedder: Embedder, top_k: int = 5):
+    vectors = np.load(DATA_DIR / f"{index_name}_vectors.npy")
+    with open(DATA_DIR / f"{index_name}_meta.json", "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
     q_vec = embedder.embed([query])
     scores = cosine_similarity(q_vec, vectors)[0]
 
@@ -49,10 +54,5 @@ def search(query: str, vectors: np.ndarray, meta: List[Dict], embedder: Embedder
         reverse=True
     )[:top_k]
 
-    return [
-        {
-            "score": float(score),
-            **item
-        }
-        for score, item in ranked
-    ]
+    return [{"score": float(s), **m} for s, m in ranked]
+

@@ -1,138 +1,113 @@
-from typing import List, Dict
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
+from typing import Optional, Literal, Any, List
 
-from retrieval import Embedder, load_index, search
+from retrieval import Embedder, load_index
 from fetchers import fetch_post_content
-from summarizer import summarize_text
 from comment_engine import generate_comment
 
-app = FastAPI(title="KiloCode ML Context Service")
+Platform = Literal[
+    "reddit",
+    "twitter",
+    "github",
+    "hackernews",
+    "youtube",
+    "substack",
+]
 
 
-# =========================
-# Request / Response Models
-# =========================
+class NormalizedPost(BaseModel):
+    id: str
+    platform: Platform
+    title: str = ""
+    content: str
+    url: str
+    author: Optional[str] = None
+    sourceContext: Optional[str] = None
+    createdAt: Optional[str] = None
+    keywordsMatched: List[str] = []
+    raw: Optional[Any] = None
 
-class ContextRequest(BaseModel):
-    post_text: str
+
+class GenerateCommentRequest(BaseModel):
+    post_url: HttpUrl
     top_k_style: int = 5
     top_k_docs: int = 5
 
 
-class ContextResponse(BaseModel):
-    style_examples: List[Dict]
-    doc_facts: List[Dict]
-
-
-class GenerateCommentRequest(BaseModel):
-    url: str
-    platform: str
-    tone: str = "professional"
-    length: str = "short"
-
-
 class GenerateCommentResponse(BaseModel):
-    post_summary: str
-    suggested_comment: str
-    confidence: float
+    comment: str
 
 
-# =========================
-# Startup (load models + data)
-# =========================
+app = FastAPI(title="KiloCode ML Context & Comment Service")
 
+
+# -----------------
+# Startup
+# -----------------
 @app.on_event("startup")
 def startup():
     global embedder
-    global comment_vectors, comment_meta
-    global doc_vectors, doc_meta
 
     embedder = Embedder()
 
-    # Load prebuilt indexes (npy + json)
-    comment_vectors, comment_meta = load_index("comments")
-    doc_vectors, doc_meta = load_index("docs")
+    # Fail early if indexes are missing
+    try:
+        load_index("comments")
+        load_index("docs")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load indexes: {e}")
 
 
-# =========================
-# Existing Context Endpoint
-# =========================
+# -----------------
+# REAL endpoint
+# -----------------
+@app.post("/ml/generate-comment", response_model=GenerateCommentResponse)
+def generate(req: GenerateCommentRequest):
+    extracted_text = fetch_post_content(str(req.post_url))
 
-@app.post("/ml/context", response_model=ContextResponse)
-def get_context(req: ContextRequest):
-    style_examples = []
-    doc_facts = []
+    if not extracted_text.strip():
+        return {
+            "comment": (
+                "This topic raises some interesting points. "
+                "Based on similar discussions, KiloCode usually approaches this "
+                "by focusing on clear context and practical implementation details."
+            )
+        }
 
-    if req.top_k_style > 0:
-        style_examples = search(
-            query=req.post_text,
-            vectors=comment_vectors,
-            meta=comment_meta,
-            embedder=embedder,
-            top_k=req.top_k_style,
-        )
-
-    if req.top_k_docs > 0:
-        doc_facts = search(
-            query=req.post_text,
-            vectors=doc_vectors,
-            meta=doc_meta,
-            embedder=embedder,
-            top_k=req.top_k_docs,
-        )
-
-    return ContextResponse(
-        style_examples=style_examples,
-        doc_facts=doc_facts,
+    post = NormalizedPost(
+        id=str(req.post_url),
+        platform="reddit",
+        content=extracted_text,
+        url=str(req.post_url),
     )
 
+    comment = generate_comment(
+        post=post,
+        embedder=embedder,
+        top_k_style=req.top_k_style,
+        top_k_docs=req.top_k_docs,
+    )
 
-# =========================
-# NEW: Comment Generation Endpoint
-# =========================
+    return {"comment": comment}
 
-@app.post("/ml/generate-comment", response_model=GenerateCommentResponse)
-def generate_comment_endpoint(req: GenerateCommentRequest):
-    try:
-        # 1️⃣ Fetch post content from URL
-        raw_text = fetch_post_content(req.url)
 
-        # 2️⃣ Summarize post
-        post_summary = summarize_text(raw_text)
+# -----------------
+# ML-only test endpoint
+# -----------------
+@app.post("/ml/test-direct", response_model=GenerateCommentResponse)
+def test_direct():
+    post = NormalizedPost(
+        id="test",
+        platform="reddit",
+        title="New free model Corethink on KiloCode",
+        content=(
+            "Someone is discussing a new free AI model on KiloCode "
+            "and comparing it with GPT and Claude."
+        ),
+        url="test",
+    )
 
-        # 3️⃣ Retrieve relevant past comments (style)
-        style_examples = search(
-            query=post_summary,
-            vectors=comment_vectors,
-            meta=comment_meta,
-            embedder=embedder,
-            top_k=3,
-        )
+    comment = generate_comment(post, embedder)
 
-        # 4️⃣ Retrieve relevant documentation facts
-        doc_facts = search(
-            query=post_summary,
-            vectors=doc_vectors,
-            meta=doc_meta,
-            embedder=embedder,
-            top_k=3,
-        )
-
-        # 5️⃣ Generate final comment suggestion
-        suggested_comment = generate_comment(
-            post_summary=post_summary,
-            style_examples=style_examples,
-            doc_facts=doc_facts,
-            tone=req.tone,
-            length=req.length,
-        )
-
-        return GenerateCommentResponse(
-            post_summary=post_summary,
-            suggested_comment=suggested_comment,
-            confidence=0.9,
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"comment": comment}
