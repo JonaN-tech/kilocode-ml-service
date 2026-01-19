@@ -5,6 +5,93 @@ from typing import List
 logger = logging.getLogger("[ML]")
 
 
+def build_lightweight_comment(title: str, content: str, platform: str) -> str:
+    """
+    Build comment WITHOUT embeddings or retrieval.
+    
+    This is the primary path for Reddit/GitHub on 512MB Render
+    to avoid OOM from model loading.
+    
+    Uses only title + content text analysis with no ML models.
+    
+    Args:
+        title: Post title
+        content: Post content (may be partial)
+        platform: Platform name
+    
+    Returns:
+        str: Generated comment
+    """
+    logger.info(f"build_lightweight title_len={len(title)} content_len={len(content)} platform={platform}")
+    
+    # Handle empty content
+    if not title and not content:
+        return "Thanks for starting this discussion!"
+    
+    if not content and title:
+        return build_title_only_comment(title, "general")
+    
+    # Detect intent from content
+    intent = detect_intent(content)
+    logger.info(f"lightweight_intent={intent}")
+    
+    # Extract keywords from content
+    words = content.split()
+    meaningful_words = [w for w in words if len(w) > 4 and
+                        w.lower() not in ['about', 'there', 'their', 'would', 'could', 'should',
+                                          'really', 'think', 'thing', 'these', 'those', 'where', 'which']]
+    
+    # Build intent-aware comment referencing actual content
+    parts = []
+    
+    if intent == "help_request":
+        if meaningful_words:
+            parts.append(f"Hope you find a solution to the {meaningful_words[0]} issue.")
+        else:
+            parts.append("Hope you find a solution to this!")
+    
+    elif intent == "share_experience":
+        if meaningful_words:
+            parts.append(f"Thanks for sharing your experience with {meaningful_words[0]}.")
+        else:
+            parts.append("Thanks for sharing your experience!")
+    
+    elif intent == "comparison":
+        if len(meaningful_words) >= 2:
+            parts.append(f"The comparison between {meaningful_words[0]} and {meaningful_words[1]} is useful.")
+        elif meaningful_words:
+            parts.append(f"Good comparison regarding {meaningful_words[0]}.")
+        else:
+            parts.append("This comparison is helpful!")
+    
+    elif intent == "ask_experience":
+        if meaningful_words:
+            parts.append(f"Regarding {meaningful_words[0]}, others have had similar questions.")
+        else:
+            parts.append("That's a common question in the community.")
+    
+    else:  # general
+        if title and meaningful_words:
+            parts.append(f"Interesting post about {title.split()[0] if title.split() else meaningful_words[0]}.")
+        elif meaningful_words:
+            parts.append(f"Your points about {meaningful_words[0]} are worth considering.")
+        elif title:
+            parts.append(f"Thanks for posting about {title[:50]}!")
+        else:
+            parts.append("Thanks for sharing this!")
+    
+    # Add a closing
+    if platform == "github":
+        parts.append("Looking forward to updates on this.")
+    else:
+        parts.append("Thanks for starting this discussion.")
+    
+    final = " ".join(parts).strip()
+    logger.info(f"lightweight_comment_built length={len(final)}")
+    
+    return final
+
+
 def detect_intent(text: str) -> str:
     """Detect intent from text for Reddit/other platforms."""
     t = text.lower()

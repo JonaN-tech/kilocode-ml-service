@@ -122,73 +122,90 @@ def startup():
 # -----------------
 @app.post("/ml/generate-comment", response_model=GenerateCommentResponse)
 def generate(req: GenerateCommentRequest):
+    """
+    Generate comment endpoint with ZERO-5XX GUARANTEE.
+    
+    This endpoint MUST NEVER throw exceptions or return 5xx.
+    All errors are caught and handled gracefully.
+    """
     url = str(req.post_url)
     
-    mem_logger.info("request_start")
-    logger.info(f"generate_comment url={url[:80]}")
-    
-    # Detect platform
-    platform = detect_platform(url)
-    logger.info(f"platform={platform}")
-    
-    # Fetch content with retries - returns dict with title, text, status, content_len
-    fetch_result = fetch_post_content(url)
-    text = fetch_result["text"]
-    title = fetch_result["title"]
-    fetch_status = fetch_result["fetch_status"]
-    content_len = fetch_result["content_len"]
-    
-    logger.info(f"fetch_status={fetch_status} content_len={content_len} title_len={len(title)}")
-    
-    # Build normalized post
-    post = NormalizedPost(
-        id=url,
-        platform=platform,
-        title=title,
-        content=text,
-        url=url,
-    )
-    
-    # Handle fetch failures
-    if fetch_status != "success":
-        logger.warning(f"fetch_failed status={fetch_status}")
-        if text.strip():
-            logger.info(f"fallback=partial_content text_length={len(text)}")
-        elif title.strip():
-            logger.info(f"fallback=title_only")
-        else:
-            logger.warning(f"fallback=emergency_no_content")
-    
-    # Generate comment with OOM protection
+    # TOP-LEVEL TRY/CATCH - NOTHING escapes this
     try:
-        mem_logger.info("before_generate")
+        mem_logger.info("request_start")
+        logger.info(f"generate_comment url={url[:80]}")
         
-        comment = generate_comment(
-            post=post,
-            embedder=embedder,
-            top_k_style=req.top_k_style,
-            top_k_docs=req.top_k_docs,
-            fetch_status=fetch_status,
+        # Detect platform
+        platform = detect_platform(url)
+        logger.info(f"platform={platform}")
+        
+        # Fetch content with retries - returns dict with title, text, status, content_len
+        fetch_result = fetch_post_content(url)
+        text = fetch_result["text"]
+        title = fetch_result["title"]
+        fetch_status = fetch_result["fetch_status"]
+        content_len = fetch_result["content_len"]
+        
+        logger.info(f"fetch_status={fetch_status} content_len={content_len} title_len={len(title)}")
+        
+        # Build normalized post
+        post = NormalizedPost(
+            id=url,
+            platform=platform,
+            title=title,
+            content=text,
+            url=url,
         )
         
-        mem_logger.info("after_generate")
-        logger.info(f"comment_generated length={len(comment)}")
+        # Handle fetch failures
+        if fetch_status != "success":
+            logger.warning(f"fetch_failed status={fetch_status}")
+            if text.strip():
+                logger.info(f"fallback=partial_content text_length={len(text)}")
+            elif title.strip():
+                logger.info(f"fallback=title_only")
+            else:
+                logger.warning(f"fallback=emergency_no_content")
         
-        return {"comment": comment}
-        
-    except MemoryError as e:
-        mem_logger.error(f"OOM_detected error={type(e).__name__}")
-        # Return lightweight fallback without crashing
-        fallback = generate_safe_fallback(post)
-        logger.info("OOM_fallback_used")
-        return {"comment": fallback}
-        
+        # Generate comment with multiple safety layers
+        try:
+            mem_logger.info("before_generate")
+            
+            comment = generate_comment(
+                post=post,
+                embedder=embedder,
+                top_k_style=req.top_k_style,
+                top_k_docs=req.top_k_docs,
+                fetch_status=fetch_status,
+            )
+            
+            mem_logger.info("after_generate")
+            logger.info(f"comment_generated length={len(comment)}")
+            
+            return {"comment": comment}
+            
+        except MemoryError as e:
+            mem_logger.error(f"OOM_detected error={type(e).__name__}")
+            # Return lightweight fallback without crashing
+            fallback = generate_safe_fallback(post)
+            logger.info("OOM_fallback_used")
+            return {"comment": fallback}
+            
+        except Exception as e:
+            logger.error(f"comment_generation_failed error={type(e).__name__}")
+            # Inner fallback
+            fallback = generate_safe_fallback(post)
+            logger.info("safe_fallback_used")
+            return {"comment": fallback}
+    
     except Exception as e:
-        logger.error(f"comment_generation_failed error={type(e).__name__}")
-        # Final fallback - NEVER return 5xx
-        fallback = generate_safe_fallback(post)
-        logger.info("safe_fallback_used")
-        return {"comment": fallback}
+        # OUTER CATCH-ALL - Last line of defense
+        # This catches ANY error including in fetch, post creation, etc.
+        logger.error(f"CRITICAL_ERROR error={type(e).__name__} url={url[:50]}")
+        mem_logger.error(f"critical_failure")
+        
+        # Return absolute minimal fallback
+        return {"comment": "Thanks for sharing this!"}
 
 
 def generate_safe_fallback(post: NormalizedPost) -> str:
