@@ -14,6 +14,7 @@ logging.basicConfig(
     format='%(name)s %(levelname)s %(message)s'
 )
 logger = logging.getLogger("[ML]")
+mem_logger = logging.getLogger("[ML][MEM]")
 
 Platform = Literal[
     "reddit",
@@ -49,6 +50,9 @@ class GenerateCommentResponse(BaseModel):
 
 
 app = FastAPI(title="KiloCode ML Context & Comment Service")
+
+# Global singleton embedder (lazy-loaded on first request)
+embedder = None
 
 
 def detect_platform(url: str) -> Platform:
@@ -90,19 +94,27 @@ def extract_title_from_url(url: str) -> str:
 # -----------------
 @app.on_event("startup")
 def startup():
+    """
+    Minimal startup - DO NOT load model here to prevent OOM.
+    Only pre-load indexes into cache.
+    """
     global embedder
-
-    logger.info("ML service starting up...")
+    
+    mem_logger.info("startup begin")
+    
+    # Create embedder instance (but don't load model yet)
     embedder = Embedder()
-
-    # Fail early if indexes are missing
+    
+    # Pre-load indexes into cache (they're small)
     try:
         load_index("comments")
         load_index("docs")
-        logger.info("Indexes loaded successfully")
+        mem_logger.info("indexes_preloaded")
     except Exception as e:
-        logger.error(f"Failed to load indexes: {e}")
-        raise RuntimeError(f"Failed to load indexes: {e}")
+        logger.error(f"index_preload_failed error={type(e).__name__}")
+        # Don't fail startup - we can still work without indexes
+    
+    mem_logger.info("startup complete")
 
 
 # -----------------
@@ -111,9 +123,11 @@ def startup():
 @app.post("/ml/generate-comment", response_model=GenerateCommentResponse)
 def generate(req: GenerateCommentRequest):
     url = str(req.post_url)
-    logger.info(f"generate_comment request url={url[:80]}")
     
-    # Detect platform from URL
+    mem_logger.info("request_start")
+    logger.info(f"generate_comment url={url[:80]}")
+    
+    # Detect platform
     platform = detect_platform(url)
     logger.info(f"detected_platform={platform}")
     
@@ -128,21 +142,18 @@ def generate(req: GenerateCommentRequest):
         url=url,
     )
     
-    # Handle fetch failures gracefully
+    # Handle fetch failures
     if fetch_status != "success":
-        logger.warning(f"fetch_failed status={fetch_status} url={url[:50]}")
-        
-        # Try title-only generation as fallback
+        logger.warning(f"fetch_failed status={fetch_status}")
         if text.strip():
-            # We got some text, just not full content
             logger.info(f"fallback=partial_content text_length={len(text)}")
         else:
-            # No content at all - generate from URL-derived title
             logger.info(f"fallback=title_only")
-            # The generate_comment function will handle title-only case
     
-    # Generate comment with platform-aware logic
+    # Generate comment with OOM protection
     try:
+        mem_logger.info("before_generate")
+        
         comment = generate_comment(
             post=post,
             embedder=embedder,
@@ -151,17 +162,24 @@ def generate(req: GenerateCommentRequest):
             fetch_status=fetch_status,
         )
         
-        logger.info(f"comment_generated length={len(comment)} url={url[:50]}")
+        mem_logger.info("after_generate")
+        logger.info(f"comment_generated length={len(comment)}")
+        
         return {"comment": comment}
         
-    except Exception as e:
-        logger.error(f"comment_generation_failed: {type(e).__name__} url={url[:50]}")
+    except MemoryError as e:
+        mem_logger.error(f"OOM_detected error={type(e).__name__}")
+        # Return lightweight fallback without crashing
+        fallback = generate_safe_fallback(post)
+        logger.info("OOM_fallback_used")
+        return {"comment": fallback}
         
-        # Final fallback - NEVER return 5xx, always return valid comment
-        # Use a generic but contextual fallback
-        fallback_comment = generate_safe_fallback(post)
-        logger.info(f"safe_fallback_used url={url[:50]}")
-        return {"comment": fallback_comment}
+    except Exception as e:
+        logger.error(f"comment_generation_failed error={type(e).__name__}")
+        # Final fallback - NEVER return 5xx
+        fallback = generate_safe_fallback(post)
+        logger.info("safe_fallback_used")
+        return {"comment": fallback}
 
 
 def generate_safe_fallback(post: NormalizedPost) -> str:

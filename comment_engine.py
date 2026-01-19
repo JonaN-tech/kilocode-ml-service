@@ -3,6 +3,7 @@ from retrieval import search_by_name
 from generation.prompt_builder import build_comment, detect_intent, detect_twitter_intent
 
 logger = logging.getLogger("[ML]")
+mem_logger = logging.getLogger("[ML][MEM]")
 
 
 def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="success"):
@@ -136,22 +137,31 @@ def generate_reddit_comment(post, embedder, top_k_style, top_k_docs, fetch_statu
         style_examples = []
         doc_facts = []
     else:
-        # Normal retrieval
-        style_examples = search_by_name(
-            query=query_text,
-            index_name="comments",
-            embedder=embedder,
-            top_k=top_k_style,
-        )
-        
-        doc_facts = search_by_name(
-            query=query_text,
-            index_name="docs",
-            embedder=embedder,
-            top_k=top_k_docs,
-        )
-        
-        logger.info(f"retrieved style_examples={len(style_examples)} doc_facts={len(doc_facts)}")
+        # Normal retrieval with memory tracking
+        try:
+            mem_logger.info("retrieval_start")
+            
+            style_examples = search_by_name(
+                query=query_text,
+                index_name="comments",
+                embedder=embedder,
+                top_k=top_k_style,
+            )
+            
+            doc_facts = search_by_name(
+                query=query_text,
+                index_name="docs",
+                embedder=embedder,
+                top_k=top_k_docs,
+            )
+            
+            mem_logger.info("retrieval_complete")
+            logger.info(f"retrieved style_examples={len(style_examples)} doc_facts={len(doc_facts)}")
+        except Exception as e:
+            # If retrieval fails, fall back to empty results
+            logger.warning(f"retrieval_failed error={type(e).__name__}")
+            style_examples = []
+            doc_facts = []
     
     # Build the comment
     comment = build_comment(
