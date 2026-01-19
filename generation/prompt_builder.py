@@ -1,5 +1,6 @@
 import logging
 import re
+from typing import List
 
 logger = logging.getLogger("[ML]")
 
@@ -65,28 +66,41 @@ def detect_twitter_intent(text: str) -> str:
     return "general"
 
 
-def build_comment(post, style_examples, doc_facts, fetch_status="success"):
+def build_comment(post, title: str, top_chunks: List[str], style_examples, doc_facts, fetch_status="success"):
     """
-    Build a comment based on post content, with no generic fallback reuse.
+    Build a comment from title and top relevant chunks.
     
-    IMPORTANT: Every comment must reference something from the input text
-    to avoid the "This topic raises some interesting points..." problem.
+    This uses the full body content indirectly (via chunks), ensuring
+    comments reference specific details from the post.
+    
+    Args:
+        post: NormalizedPost object
+        title: Post title
+        top_chunks: List of most relevant content chunks (1-3 chunks)
+        style_examples: Retrieved style examples
+        doc_facts: Retrieved documentation facts
+        fetch_status: Fetch status
+    
+    Returns:
+        str: Generated comment
     """
-    content = post.content.strip()
-    title = post.title.strip()
+    logger.info(f"build_comment title_len={len(title)} num_chunks={len(top_chunks)} fetch_status={fetch_status}")
     
-    logger.info(f"build_comment fetch_status={fetch_status} content_length={len(content)}")
+    # Combine title and top chunks for analysis
+    combined_text = title
+    if top_chunks:
+        combined_text += " " + " ".join(top_chunks[:2])  # Use top 2 chunks
     
-    # Detect intent
-    intent = detect_intent(content or title)
+    # Detect intent from combined text
+    intent = detect_intent(combined_text)
     logger.info(f"detected_intent={intent}")
     
-    # If we have no content at all, generate from title only
-    if not content and title:
+    # If we have no content at all, use title-only
+    if not top_chunks and title:
         return build_title_only_comment(title, intent)
     
-    # If we have content, generate from it
-    return build_content_comment(content, title, intent, style_examples, doc_facts, fetch_status)
+    # Build comment from chunks
+    return build_chunk_comment(title, top_chunks, intent, style_examples, doc_facts)
 
 
 def build_title_only_comment(title: str, intent: str) -> str:
@@ -99,7 +113,7 @@ def build_title_only_comment(title: str, intent: str) -> str:
     if intent == "help_request":
         return f"I see you're asking about {', '.join(key_topics[:2]) if key_topics else 'this topic'}. Hope you get some helpful responses!"
     
-    elif intent == "question":
+    elif intent == "comparison":
         return f"Great question about {', '.join(key_topics[:2]) if key_topics else 'this topic'}! Looking forward to seeing the answers."
     
     elif intent == "share_experience":
@@ -109,89 +123,99 @@ def build_title_only_comment(title: str, intent: str) -> str:
         return f"Interesting post about {', '.join(key_topics[:2]) if key_topics else 'this topic'}! Thanks for starting this discussion."
 
 
-def build_content_comment(content: str, title: str, intent: str, style_examples, doc_facts, fetch_status) -> str:
+def build_chunk_comment(title: str, chunks: List[str], intent: str, style_examples, doc_facts) -> str:
     """
-    Build comment from content with proper intent handling.
+    Build comment from title and relevant chunks.
     
-    NO generic fallbacks - each comment references something from the input.
+    IMPORTANT: Each comment MUST reference specific details from the chunks
+    to avoid generic fallbacks.
     """
     parts = []
     
-    # Extract a unique phrase from the content to reference
-    content_lower = content.lower()
-    words = content.split()
+    # Extract meaningful keywords from the chunks
+    all_chunk_text = " ".join(chunks[:2])  # Use top 2 chunks
+    words = all_chunk_text.split()
     
     # Find meaningful keywords to reference
     meaningful_words = [w for w in words if len(w) > 4 and 
-                        w.lower() not in ['about', 'there', 'their', 'would', 'could', 'should', 'really', 'think', 'thing']]
+                        w.lower() not in ['about', 'there', 'their', 'would', 'could', 'should', 
+                                          'really', 'think', 'thing', 'these', 'those', 'where']]
     
-    # Reference something specific from content
+    # Reference something specific from chunks
     referenced = ""
     if meaningful_words:
-        # Pick a word that appears in content
+        # Pick a distinctive word that appears in chunks
         referenced = meaningful_words[0].strip('.,!?')
     
-    # --- Intent-aware opening (MUST reference content) ---
+    # --- Intent-aware opening (MUST reference chunk content) ---
     if intent == "share_experience":
         if referenced:
             parts.append(f"I appreciate you sharing your experience with {referenced}.")
         else:
-            parts.append("Thanks for sharing your experience!")
+            parts.append(f"Thanks for sharing your experience in this post.")
         
-        if "fast" in content_lower or "speed" in content_lower:
-            parts.append("Speed is indeed a factor many notice first.")
+        if "fast" in all_chunk_text.lower() or "speed" in all_chunk_text.lower():
+            parts.append("Performance is definitely a key consideration.")
     
     elif intent == "comparison":
         if referenced:
-            parts.append(f"The comparison around {referenced} is very relevant right now.")
+            parts.append(f"The comparison around {referenced} raises important points.")
         else:
-            parts.append("Comparisons like this help put things in perspective.")
+            parts.append(f"This comparison between {title.split()[:2]} is very relevant.")
     
     elif intent == "ask_experience":
         if referenced:
-            parts.append(f"Regarding {referenced}, some people have reported similar results.")
+            parts.append(f"Regarding {referenced}, others have had similar questions.")
         else:
-            parts.append("That's a good question many have asked before.")
+            parts.append("That's a common question in the community.")
     
     elif intent == "help_request":
         if referenced:
-            parts.append(f"Hopefully someone can help with {referenced}.")
+            parts.append(f"The issue with {referenced} is worth investigating.")
         else:
-            parts.append("Hope you get some helpful answers on this!")
+            parts.append("Hope you find a solution to this!")
     
     elif intent == "appreciation":
-        parts.append("Glad this was helpful for you!")
+        parts.append("Glad this has been helpful!")
     
     else:  # general
         if referenced:
-            parts.append(f"This raises some interesting points about {referenced}.")
+            parts.append(f"This raises interesting points about {referenced}.")
+        elif title:
+            # Reference title
+            title_words = [w for w in title.split() if len(w) > 4]
+            if title_words:
+                parts.append(f"The discussion about {title_words[0]} is very timely.")
+            else:
+                parts.append("This is a thoughtful contribution to the discussion.")
         else:
-            parts.append("This is a thoughtful contribution to the discussion.")
+            parts.append("This is a thoughtful contribution.")
     
-    # --- Add a contextual sentence (NOT a generic doc dump) ---
-    # Only add doc hint if we actually have content and it's relevant
-    doc_hint = ""
-    for d in doc_facts:
-        text = d.get("text", "")
-        if text and len(text.split()) < 25:
-            doc_hint = text.rstrip(".")
-            break
+    # --- Add contextual insight from chunks if available ---
+    # Find a specific detail or quote from the chunks
+    if chunks and len(chunks[0]) > 50:
+        # Take a relevant snippet from the first chunk
+        first_chunk = chunks[0]
+        sentences = re.split(r'[.!?]', first_chunk)
+        if len(sentences) > 1 and len(sentences[1].strip()) > 20:
+            # Reference a specific sentence
+            snippet = sentences[1].strip()[:100]
+            if snippet:
+                parts.append(f"The point about {snippet.lower().split()[:5]} is particularly relevant.")
     
-    # Only add doc hint if it makes sense contextually
-    if doc_hint and referenced and referenced.lower() in doc_hint.lower():
-        parts.append(doc_hint + ".")
-    
-    # --- Optional: Add style example if short and relevant ---
+    # --- Optional: Add style example if relevant ---
     if style_examples:
         base_comment = style_examples[0].get("comment_text", "").strip()
-        if base_comment and len(base_comment.split()) < 30:
-            parts.append(base_comment)
+        if base_comment and len(base_comment.split()) < 25:
+            # Only add if it's short and relevant
+            if any(keyword in base_comment.lower() for keyword in meaningful_words[:3]):
+                parts.append(base_comment)
     
     # Join and finalize
     final = " ".join(parts).strip()
     
-    # Guard rule: never ask what the post already answered
-    if "have you" in final.lower() and "i have" in content_lower:
+    # Guard rule: avoid redundant questions
+    if "have you" in final.lower() and "i have" in all_chunk_text.lower():
         final = re.sub(r'\bhave you\b', '', final, flags=re.IGNORECASE)
         final = re.sub(r'\s+', ' ', final).strip()
     

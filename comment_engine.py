@@ -1,6 +1,7 @@
 import logging
 from retrieval import search_by_name
 from generation.prompt_builder import build_comment, detect_intent, detect_twitter_intent
+from text_utils import clean_text, chunk_text
 
 logger = logging.getLogger("[ML]")
 mem_logger = logging.getLogger("[ML][MEM]")
@@ -15,7 +16,7 @@ def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="
         embedder: Embedder instance
         top_k_style: Number of style examples to retrieve
         top_k_docs: Number of documentation facts to retrieve
-        fetch_status: Status from fetch_post_content ("success", "http_error", "timeout", "blocked", "error")
+        fetch_status: Status from fetch_post_content
     
     Returns:
         str: Generated comment
@@ -27,8 +28,8 @@ def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="
     if platform == "twitter":
         return generate_twitter_comment(post, embedder, fetch_status)
     
-    # Handle Reddit and other platforms
-    return generate_reddit_comment(post, embedder, top_k_style, top_k_docs, fetch_status)
+    # Handle Reddit, GitHub, and other platforms with chunked processing
+    return generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_status)
 
 
 def generate_twitter_comment(post, embedder, fetch_status):
@@ -110,66 +111,153 @@ def build_twitter_comment(text, intent, text_length):
             return "Thanks for sharing this! Interesting perspective."
 
 
-def generate_reddit_comment(post, embedder, top_k_style, top_k_docs, fetch_status):
+def generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_status):
     """
-    Generate Reddit/other platform comment.
-    - Prefer post title + body
-    - If body fetch fails, fall back to title-only
-    - Never hard-fail, always return valid comment
+    Generate comment for long-form content (Reddit, GitHub, etc.).
+    Uses chunked processing for memory safety on large posts.
+    
+    Process:
+    1. Clean the full body text
+    2. Chunk it into manageable pieces
+    3. Embed chunks incrementally and find most relevant ones
+    4. Generate comment from title + top chunks
     """
-    # Check if we have content
-    has_content = bool(post.content.strip())
-    has_title = bool(post.title.strip())
+    title = post.title.strip()
+    content = post.content.strip()
     
-    logger.info(f"reddit has_content={has_content} has_title={has_title} fetch_status={fetch_status}")
+    has_content = bool(content)
+    has_title = bool(title)
     
+    logger.info(f"longform has_content={has_content} has_title={has_title} fetch_status={fetch_status}")
+    
+    # Handle empty content case
+    if not has_content and not has_title:
+        logger.warning("longform_no_content")
+        return "Thanks for starting this discussion!"
+    
+    # Title-only fallback
     if not has_content:
-        logger.info(f"reddit_fallback=title_only")
-        # Generate from title only
-        query_text = post.title.strip()
-    else:
-        query_text = f"{post.title}\n\n{post.content}".strip()
+        logger.info("longform_title_only")
+        return generate_title_only_comment(title)
     
-    # Determine what to search for
-    if not has_content or fetch_status != "success":
-        logger.info(f"reddit_no_body_fallback")
-        # Don't search docs if we don't have content
+    try:
+        # Step 1: Clean the full body (still use full content, just remove noise)
+        mem_logger.info(f"clean_start content_len={len(content)}")
+        cleaned_content = clean_text(content, max_length=25000)
+        logger.info(f"cleaned content_len={len(content)} -> {len(cleaned_content)}")
+        
+        # Step 2: Chunk the cleaned content
+        mem_logger.info("chunk_start")
+        chunks = chunk_text(cleaned_content, chunk_chars=1000, overlap=150, max_chunks=12)
+        logger.info(f"chunked num_chunks={len(chunks)}")
+        
+        if not chunks:
+            logger.warning("chunk_empty_falling_back_to_title")
+            return generate_title_only_comment(title)
+        
+        # Step 3: Find most relevant chunks using embedder
+        mem_logger.info("embed_chunks_start")
+        query_text = f"{title}\n\n{chunks[0][:500]}"  # Use title + first bit for query
+        
+        top_chunks = embedder.embed_chunked(
+            chunks=chunks,
+            query=query_text,
+            top_k=3
+        )
+        
+        logger.info(f"top_chunks selected={len(top_chunks)}")
+        
+        # Step 4: Retrieve style examples and docs (still useful for context)
         style_examples = []
         doc_facts = []
+        
+        if fetch_status == "success" and top_chunks:
+            try:
+                mem_logger.info("retrieval_start")
+                
+                # Use top chunk for retrieval
+                retrieval_query = f"{title} {top_chunks[0][0][:300]}"
+                
+                style_examples = search_by_name(
+                    query=retrieval_query,
+                    index_name="comments",
+                    embedder=embedder,
+                    top_k=top_k_style,
+                )
+                
+                doc_facts = search_by_name(
+                    query=retrieval_query,
+                    index_name="docs",
+                    embedder=embedder,
+                    top_k=top_k_docs,
+                )
+                
+                mem_logger.info("retrieval_complete")
+                logger.info(f"retrieved style={len(style_examples)} docs={len(doc_facts)}")
+            
+            except Exception as e:
+                logger.warning(f"retrieval_failed error={type(e).__name__}")
+                # Continue without retrieval
+        
+        # Step 5: Build final comment
+        comment = build_comment(
+            post=post,
+            title=title,
+            top_chunks=[chunk for chunk, score in top_chunks],
+            style_examples=style_examples,
+            doc_facts=doc_facts,
+            fetch_status=fetch_status,
+        )
+        
+        logger.info(f"comment_generated length={len(comment)}")
+        return comment
+    
+    except MemoryError as e:
+        mem_logger.error(f"OOM_in_chunked_processing error={type(e).__name__}")
+        # Emergency fallback: use only title + first 300 chars
+        return generate_emergency_fallback(title, content[:300])
+    
+    except Exception as e:
+        logger.error(f"longform_generation_failed error={type(e).__name__}")
+        # Fallback to title-based comment
+        if title:
+            return generate_title_only_comment(title)
+        else:
+            return "This is an interesting discussion. Thanks for sharing!"
+
+
+def generate_title_only_comment(title: str) -> str:
+    """Generate a comment when only title is available."""
+    if not title:
+        return "Thanks for starting this discussion!"
+    
+    # Extract key topics from title
+    words = title.split()
+    key_topics = [w for w in words if len(w) > 3 and w.lower() not in 
+                  {'this', 'that', 'with', 'from', 'have', 'they', 'their', 'what', 'about'}]
+    
+    if key_topics:
+        topic_str = ' '.join(key_topics[:2])
+        return f"Interesting post about {topic_str}! Thanks for starting this discussion."
     else:
-        # Normal retrieval with memory tracking
-        try:
-            mem_logger.info("retrieval_start")
-            
-            style_examples = search_by_name(
-                query=query_text,
-                index_name="comments",
-                embedder=embedder,
-                top_k=top_k_style,
-            )
-            
-            doc_facts = search_by_name(
-                query=query_text,
-                index_name="docs",
-                embedder=embedder,
-                top_k=top_k_docs,
-            )
-            
-            mem_logger.info("retrieval_complete")
-            logger.info(f"retrieved style_examples={len(style_examples)} doc_facts={len(doc_facts)}")
-        except Exception as e:
-            # If retrieval fails, fall back to empty results
-            logger.warning(f"retrieval_failed error={type(e).__name__}")
-            style_examples = []
-            doc_facts = []
+        return "Thanks for starting this discussion!"
+
+
+def generate_emergency_fallback(title: str, content_snippet: str) -> str:
+    """
+    Emergency fallback for OOM or extreme errors.
+    Uses minimal processing on title + snippet.
+    """
+    logger.info("emergency_fallback_triggered")
     
-    # Build the comment
-    comment = build_comment(
-        post=post,
-        style_examples=style_examples,
-        doc_facts=doc_facts,
-        fetch_status=fetch_status,
-    )
+    if title and content_snippet:
+        # Extract a keyword from content
+        words = content_snippet.split()
+        keywords = [w for w in words if len(w) > 4]
+        if keywords:
+            return f"Regarding {title}: {keywords[0]} is definitely worth discussing further."
     
-    logger.info(f"reddit_comment_generated length={len(comment)}")
-    return comment
+    if title:
+        return f"Thanks for posting about {title}!"
+    
+    return "Thanks for sharing this!"

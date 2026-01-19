@@ -129,15 +129,22 @@ def generate(req: GenerateCommentRequest):
     
     # Detect platform
     platform = detect_platform(url)
-    logger.info(f"detected_platform={platform}")
+    logger.info(f"platform={platform}")
     
-    # Fetch content with retries
-    text, fetch_status = fetch_post_content(url)
+    # Fetch content with retries - returns dict with title, text, status, content_len
+    fetch_result = fetch_post_content(url)
+    text = fetch_result["text"]
+    title = fetch_result["title"]
+    fetch_status = fetch_result["fetch_status"]
+    content_len = fetch_result["content_len"]
+    
+    logger.info(f"fetch_status={fetch_status} content_len={content_len} title_len={len(title)}")
     
     # Build normalized post
     post = NormalizedPost(
         id=url,
         platform=platform,
+        title=title,
         content=text,
         url=url,
     )
@@ -147,8 +154,10 @@ def generate(req: GenerateCommentRequest):
         logger.warning(f"fetch_failed status={fetch_status}")
         if text.strip():
             logger.info(f"fallback=partial_content text_length={len(text)}")
-        else:
+        elif title.strip():
             logger.info(f"fallback=title_only")
+        else:
+            logger.warning(f"fallback=emergency_no_content")
     
     # Generate comment with OOM protection
     try:
