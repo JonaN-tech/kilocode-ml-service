@@ -70,7 +70,22 @@ def generate_lightweight_comment(post, title: str, content: str):
             content=content,
             platform=post.platform
         )
-        logger.info(f"lightweight_comment_generated length={len(comment)}")
+        
+        # Enhanced diagnostic logging
+        import re
+        sentence_count = len([s for s in re.split(r'[.!?]+', comment.strip()) if s.strip()])
+        kilocode_in_comment = "kilocode" in comment.lower()
+        
+        logger.info(
+            f"[ML] comment_generated "
+            f"platform={post.platform} "
+            f"comment_length={sentence_count} sentences "
+            f"char_length={len(comment)} "
+            f"kilocode_injected={kilocode_in_comment} "
+            f"docs_used=0 "
+            f"embeddings_used=false"
+        )
+        
         return comment
     except Exception as e:
         logger.error(f"lightweight_comment_failed error={type(e).__name__}")
@@ -116,7 +131,24 @@ def generate_twitter_comment(post, embedder, fetch_status):
         return "Thanks for sharing this resource!"
     
     # Generate conversational reply based on detected intent
-    return build_twitter_comment(text, twitter_intent, text_length)
+    comment = build_twitter_comment(text, twitter_intent, text_length)
+    
+    # Enhanced diagnostic logging
+    import re
+    sentence_count = len([s for s in re.split(r'[.!?]+', comment.strip()) if s.strip()])
+    kilocode_in_comment = "kilocode" in comment.lower()
+    
+    logger.info(
+        f"[ML] comment_generated "
+        f"platform=twitter "
+        f"comment_length={sentence_count} sentences "
+        f"char_length={len(comment)} "
+        f"kilocode_injected={kilocode_in_comment} "
+        f"docs_used=0 "
+        f"embeddings_used=false"
+    )
+    
+    return comment
 
 
 def build_twitter_comment(text, intent, text_length):
@@ -227,7 +259,22 @@ def generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_st
             fetch_status=fetch_status,
         )
         
-        logger.info(f"longform_comment_generated length={len(comment)}")
+        # Enhanced diagnostic logging
+        import re
+        sentence_count = len([s for s in re.split(r'[.!?]+', comment.strip()) if s.strip()])
+        kilocode_in_comment = "kilocode" in comment.lower()
+        
+        logger.info(
+            f"[ML] comment_generated "
+            f"platform={post.platform} "
+            f"comment_length={sentence_count} sentences "
+            f"char_length={len(comment)} "
+            f"kilocode_injected={kilocode_in_comment} "
+            f"docs_used={len(doc_facts)} "
+            f"examples_used={len(style_examples)} "
+            f"embeddings_used=true"
+        )
+        
         return comment
     
     except MemoryError as e:
