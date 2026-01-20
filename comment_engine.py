@@ -8,7 +8,7 @@ logger = logging.getLogger("[ML]")
 mem_logger = logging.getLogger("[ML][MEM]")
 
 # CRITICAL SAFETY LIMITS - Prevent RAM spikes on Render (512MB)
-MAX_CONTENT_LEN = 1500  # Max chars for synchronous processing
+MAX_CONTENT_LEN = 2500  # Max chars for synchronous processing
 MAX_CHUNKS = 2          # Max chunks to prevent explosion
 
 
