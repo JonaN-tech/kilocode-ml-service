@@ -1,7 +1,8 @@
 import logging
 from fastapi import HTTPException
 from retrieval import search_by_name
-from generation.prompt_builder import build_comment, build_lightweight_comment, detect_intent, detect_twitter_intent
+from generation.gemini_generator import generate_comment_with_gemini
+from generation.prompt_builder import detect_intent, detect_twitter_intent
 from text_utils import clean_text, chunk_text
 
 logger = logging.getLogger("[ML]")
@@ -74,22 +75,26 @@ def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="
 
 def generate_lightweight_comment(post, title: str, content: str):
     """
-    Generate comment WITHOUT embeddings or vector retrieval.
+    Generate comment using Gemini AI WITHOUT embeddings or vector retrieval.
     
-    This is the primary path for Reddit/GitHub to avoid OOM on 512MB Render.
-    Uses only title + content text analysis.
+    This is the primary path for Reddit/GitHub on 512MB Render.
+    Uses Gemini's generative AI with strict quality constraints.
+    
+    CRITICAL: This now uses Gemini generation, not templates.
     """
     logger.info(f"lightweight_comment_path title_len={len(title)} content_len={len(content)}")
     
     if not title and not content:
         return "Thanks for starting this discussion!"
     
-    # Use lightweight comment builder (no embeddings)
+    # Use Gemini generator with empty retrieval context
     try:
-        comment = build_lightweight_comment(
-            title=title,
-            content=content,
-            platform=post.platform
+        comment = generate_comment_with_gemini(
+            post_title=title,
+            post_content=content,
+            doc_facts=[],  # No retrieval for lightweight path
+            style_examples=[],
+            max_retries=1
         )
         
         # Enhanced diagnostic logging
@@ -104,16 +109,23 @@ def generate_lightweight_comment(post, title: str, content: str):
             f"char_length={len(comment)} "
             f"kilocode_injected={kilocode_in_comment} "
             f"docs_used=0 "
-            f"embeddings_used=false"
+            f"embeddings_used=false "
+            f"generation=gemini"
         )
         
         return comment
     except Exception as e:
         logger.error(f"lightweight_comment_failed error={type(e).__name__}")
-        # Ultra-safe fallback
-        if title:
-            return f"Thanks for posting about {title[:50]}!"
-        return "Thanks for sharing this!"
+        # Emergency fallback
+        topic_words = (title + " " + content).split()
+        meaningful = [w for w in topic_words if len(w) > 5][:2]
+        topic = " and ".join(meaningful) if meaningful else "this"
+        
+        return (
+            f"The challenge with {topic} is definitely worth exploring. "
+            f"KiloCode can help analyze these kinds of problems systematically "
+            f"and suggest solutions based on similar patterns."
+        )
 
 
 def generate_twitter_comment(post, embedder, fetch_status):
@@ -214,18 +226,18 @@ def build_twitter_comment(text, intent, text_length):
 
 def generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_status):
     """
-    Generate comment for long-form content using embeddings.
+    Generate comment for long-form content using Gemini + embeddings.
     
-    WARNING: This triggers model loading and uses significant RAM.
-    Should only be called for non-Reddit platforms with content >= 1500 chars
-    where embeddings are truly necessary.
+    This uses embeddings to retrieve relevant context, then uses Gemini
+    to generate a high-quality, contextual comment.
     
-    This path should be RARE on 512MB Render instances.
+    WARNING: This triggers embeddings (uses Gemini API for embeddings).
+    Should only be called for non-Reddit platforms with content >= 1500 chars.
     """
     title = post.title.strip()
     content = post.content.strip()
     
-    logger.warning(f"longform_embeddings_path platform={post.platform} content_len={len(content)} USES_RAM=true")
+    logger.warning(f"longform_path platform={post.platform} content_len={len(content)}")
     mem_logger.info("before_embeddings")
     
     try:
@@ -245,14 +257,14 @@ def generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_st
             mem_logger.info("embeddings_skipped reason=no_chunks")
             return generate_lightweight_comment(post, title, content[:500])
         
-        # Embed chunks (THIS LOADS MODEL - HIGH MEMORY)
+        # Embed chunks (uses Gemini Embeddings API)
         query_text = f"{title} {chunks[0][:500]}"
         top_chunks = embedder.embed_chunked(chunks=chunks, query=query_text, top_k=3)
         
         mem_logger.info("after_embeddings")
         logger.info(f"top_chunks selected={len(top_chunks)}")
         
-        # Retrieve style/docs
+        # Retrieve style/docs using embeddings
         style_examples = []
         doc_facts = []
         
@@ -275,14 +287,16 @@ def generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_st
             
             logger.info(f"retrieved style={len(style_examples)} docs={len(doc_facts)}")
         
-        # Build comment
-        comment = build_comment(
-            post=post,
-            title=title,
-            top_chunks=[chunk for chunk, score in top_chunks],
-            style_examples=style_examples,
+        # Use top chunks as content
+        chunk_content = " ".join([chunk for chunk, score in top_chunks])
+        
+        # Generate comment using Gemini with retrieved context
+        comment = generate_comment_with_gemini(
+            post_title=title,
+            post_content=chunk_content[:1500],  # Use chunked content
             doc_facts=doc_facts,
-            fetch_status=fetch_status,
+            style_examples=style_examples,
+            max_retries=1
         )
         
         # Enhanced diagnostic logging
@@ -298,7 +312,8 @@ def generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_st
             f"kilocode_injected={kilocode_in_comment} "
             f"docs_used={len(doc_facts)} "
             f"examples_used={len(style_examples)} "
-            f"embeddings_used=true"
+            f"embeddings_used=true "
+            f"generation=gemini"
         )
         
         return comment
