@@ -4,7 +4,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import Optional, Literal, Any, List, Tuple
 
-from ml.embeddings import get_embed_model
 from retrieval import Embedder, load_index
 from fetchers import fetch_post_content
 from comment_engine import generate_comment
@@ -97,24 +96,18 @@ def extract_title_from_url(url: str) -> str:
 @app.on_event("startup")
 def startup():
     """
-    Load embedding model and indexes at startup.
+    Initialize embedder and pre-load indexes at startup.
     
-    CRITICAL: This prevents per-request model loading that causes RAM spikes.
+    CRITICAL: Gemini embeddings don't require model loading,
+    eliminating the RAM spike that crashed Render.
     """
     global embedder
     
-    mem_logger.info("startup begin")
+    mem_logger.info("startup_begin service=gemini-embeddings")
     
-    # Preload embedding model (singleton pattern)
-    try:
-        get_embed_model()
-        mem_logger.info("embedding_model_preloaded")
-    except Exception as e:
-        mem_logger.error(f"model_preload_failed error={type(e).__name__}")
-        # Continue - embedder will try lazy load if needed
-    
-    # Create embedder instance
+    # Create embedder instance (no model loading with Gemini)
     embedder = Embedder()
+    mem_logger.info("embedder_initialized type=gemini")
     
     # Pre-load indexes into cache (they're small)
     try:
@@ -125,7 +118,7 @@ def startup():
         logger.error(f"index_preload_failed error={type(e).__name__}")
         # Don't fail startup - we can still work without indexes
     
-    mem_logger.info("startup complete")
+    mem_logger.info("startup_complete ram_usage=minimal")
 
 
 # -----------------

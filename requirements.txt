@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 
-sentence-transformers==5.2.0
-torch==2.5.0
+# Gemini API for embeddings (FREE tier via AI Studio)
+google-generativeai
+
 numpy
 scipy
 scikit-learn
