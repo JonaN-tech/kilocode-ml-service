@@ -1,4 +1,5 @@
 import logging
+from fastapi import HTTPException
 from retrieval import search_by_name
 from generation.prompt_builder import build_comment, build_lightweight_comment, detect_intent, detect_twitter_intent
 from text_utils import clean_text, chunk_text
@@ -6,12 +7,19 @@ from text_utils import clean_text, chunk_text
 logger = logging.getLogger("[ML]")
 mem_logger = logging.getLogger("[ML][MEM]")
 
+# CRITICAL SAFETY LIMITS - Prevent RAM spikes on Render (512MB)
+MAX_CONTENT_LEN = 1500  # Max chars for synchronous processing
+MAX_CHUNKS = 2          # Max chunks to prevent explosion
+
 
 def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="success"):
     """
     Generate a platform-aware comment with strict memory safety.
     
-    CRITICAL: Reddit/GitHub < 1500 chars MUST NOT trigger embeddings.
+    CRITICAL SAFETY RULES:
+    - Reddit: NEVER uses embeddings (always lightweight)
+    - Twitter: NEVER uses embeddings (always lightweight)
+    - Content > MAX_CONTENT_LEN: Rejected with 413 error
     
     Args:
         post: NormalizedPost object
@@ -30,17 +38,30 @@ def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="
     
     logger.info(f"generate_comment platform={platform} content_len={content_len} fetch_status={fetch_status}")
     
+    # HARD SAFETY LIMIT: Reject content that's too long
+    if content_len > MAX_CONTENT_LEN:
+        logger.warning(f"content_too_long content_len={content_len} max={MAX_CONTENT_LEN}")
+        raise HTTPException(
+            status_code=413,
+            detail=f"Post too long for synchronous processing (max {MAX_CONTENT_LEN} chars)"
+        )
+    
     # CRITICAL: Twitter never uses embeddings
     if platform == "twitter":
         logger.info("embeddings_skipped=true reason=twitter_platform")
         return generate_twitter_comment(post, embedder, fetch_status)
     
-    # CRITICAL: Reddit/GitHub with short content skip embeddings
-    if platform in ["reddit", "github"] and content_len < 1500:
+    # CRITICAL: Reddit NEVER uses embeddings (regardless of length)
+    if platform == "reddit":
+        logger.info(f"embeddings_disabled=reddit platform={platform} content_len={content_len}")
+        return generate_lightweight_comment(post, title, content)
+    
+    # GitHub with short content uses lightweight
+    if platform == "github" and content_len < 1500:
         logger.info(f"embeddings_skipped=true reason=short_content platform={platform} content_len={content_len}")
         return generate_lightweight_comment(post, title, content)
     
-    # Only proceed with embeddings if absolutely necessary
+    # Only proceed with embeddings for non-Reddit platforms with longer content
     # This path should rarely be hit on Render (512MB)
     if content_len >= 1500:
         logger.warning(f"embeddings_required=true platform={platform} content_len={content_len}")
@@ -196,21 +217,26 @@ def generate_long_form_comment(post, embedder, top_k_style, top_k_docs, fetch_st
     Generate comment for long-form content using embeddings.
     
     WARNING: This triggers model loading and uses significant RAM.
-    Should only be called for content >= 1500 chars where embeddings
-    are truly necessary.
+    Should only be called for non-Reddit platforms with content >= 1500 chars
+    where embeddings are truly necessary.
     
     This path should be RARE on 512MB Render instances.
     """
     title = post.title.strip()
     content = post.content.strip()
     
-    logger.warning(f"longform_embeddings_path content_len={len(content)} USES_RAM=true")
+    logger.warning(f"longform_embeddings_path platform={post.platform} content_len={len(content)} USES_RAM=true")
     mem_logger.info("before_embeddings")
     
     try:
-        # Clean and chunk
-        cleaned_content = clean_text(content, max_length=25000)
+        # Clean and chunk with HARD LIMITS
+        cleaned_content = clean_text(content, max_length=MAX_CONTENT_LEN)
         chunks = chunk_text(cleaned_content, chunk_chars=1000, overlap=150, max_chunks=8)
+        
+        # ENFORCE MAX_CHUNKS safety limit
+        if len(chunks) > MAX_CHUNKS:
+            logger.warning(f"chunk_limit_exceeded num_chunks={len(chunks)} max={MAX_CHUNKS}")
+            chunks = chunks[:MAX_CHUNKS]
         
         logger.info(f"chunked num_chunks={len(chunks)}")
         

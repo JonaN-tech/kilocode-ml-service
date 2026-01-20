@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import Optional, Literal, Any, List, Tuple
 
+from ml.embeddings import get_embed_model
 from retrieval import Embedder, load_index
 from fetchers import fetch_post_content
 from comment_engine import generate_comment
@@ -43,6 +44,7 @@ class GenerateCommentRequest(BaseModel):
     post_url: HttpUrl
     top_k_style: int = 3
     top_k_docs: int = 3
+    source: Optional[str] = "api"
 
 
 class GenerateCommentResponse(BaseModel):
@@ -95,14 +97,23 @@ def extract_title_from_url(url: str) -> str:
 @app.on_event("startup")
 def startup():
     """
-    Minimal startup - DO NOT load model here to prevent OOM.
-    Only pre-load indexes into cache.
+    Load embedding model and indexes at startup.
+    
+    CRITICAL: This prevents per-request model loading that causes RAM spikes.
     """
     global embedder
     
     mem_logger.info("startup begin")
     
-    # Create embedder instance (but don't load model yet)
+    # Preload embedding model (singleton pattern)
+    try:
+        get_embed_model()
+        mem_logger.info("embedding_model_preloaded")
+    except Exception as e:
+        mem_logger.error(f"model_preload_failed error={type(e).__name__}")
+        # Continue - embedder will try lazy load if needed
+    
+    # Create embedder instance
     embedder = Embedder()
     
     # Pre-load indexes into cache (they're small)
@@ -129,6 +140,14 @@ def generate(req: GenerateCommentRequest):
     All errors are caught and handled gracefully.
     """
     url = str(req.post_url)
+    
+    # Detect /docs calls and return safe placeholder
+    if req.source == "docs":
+        logger.info("docs_call_detected returning_placeholder")
+        return {
+            "comment": "This is a placeholder response. The /docs UI is for testing only. "
+            "Production calls use 'source=api' and run the full ML pipeline."
+        }
     
     # TOP-LEVEL TRY/CATCH - NOTHING escapes this
     try:
@@ -198,14 +217,20 @@ def generate(req: GenerateCommentRequest):
             logger.info("safe_fallback_used")
             return {"comment": fallback}
     
+    except HTTPException:
+        # Re-raise HTTP exceptions (proper 4xx responses)
+        raise
     except Exception as e:
         # OUTER CATCH-ALL - Last line of defense
         # This catches ANY error including in fetch, post creation, etc.
         logger.error(f"CRITICAL_ERROR error={type(e).__name__} url={url[:50]}")
         mem_logger.error(f"critical_failure")
         
-        # Return absolute minimal fallback
-        return {"comment": "Thanks for sharing this!"}
+        # Return JSON error response (never HTML)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal ML pipeline error - returning safe fallback"
+        )
 
 
 def generate_safe_fallback(post: NormalizedPost) -> str:
