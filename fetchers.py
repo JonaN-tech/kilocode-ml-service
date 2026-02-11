@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import time
 import logging
 import re
+import json
 
 logger = logging.getLogger("[ML]")
 
@@ -101,6 +102,8 @@ def extract_title(soup: BeautifulSoup, url: str) -> str:
     """
     Extract title from HTML soup with platform-specific logic.
     
+    ENHANCED: Better handling for Reddit's dynamic content.
+    
     Args:
         soup: BeautifulSoup object
         url: Original URL for fallback extraction
@@ -109,45 +112,194 @@ def extract_title(soup: BeautifulSoup, url: str) -> str:
         Extracted title string
     """
     title = ""
+    is_reddit = "reddit.com" in url.lower()
     
-    # Try common title tags in order of preference
-    if soup.title:
+    # Platform-specific extraction
+    if is_reddit:
+        title = extract_reddit_title(soup, url)
+        if title and len(title) > 10:
+            logger.info(f"reddit_title_extracted length={len(title)} method=platform_specific")
+            return title
+    
+    # Try og:title first (most reliable for modern sites)
+    og_title = soup.find("meta", property="og:title")
+    if og_title and og_title.get("content"):
+        title = og_title["content"]
+        if title and len(title.strip()) > 10:
+            logger.info(f"title_from_og_title length={len(title)}")
+            return clean_title(title, url)
+    
+    # Try Twitter card title
+    twitter_title = soup.find("meta", {"name": "twitter:title"})
+    if twitter_title and twitter_title.get("content"):
+        title = twitter_title["content"]
+        if title and len(title.strip()) > 10:
+            logger.info(f"title_from_twitter_card length={len(title)}")
+            return clean_title(title, url)
+    
+    # Try <title> tag
+    if soup.title and soup.title.string:
         title = soup.title.string
-    elif soup.find("h1"):
-        title = soup.find("h1").get_text()
-    elif soup.find("meta", property="og:title"):
-        title = soup.find("meta", property="og:title")["content"]
-    elif soup.find("meta", {"name": "title"}):
-        title = soup.find("meta", {"name": "title"})["content"]
+        if title and len(title.strip()) > 10:
+            logger.info(f"title_from_title_tag length={len(title)}")
+            return clean_title(title, url)
+    
+    # Try <h1> tag
+    h1 = soup.find("h1")
+    if h1:
+        title = h1.get_text(strip=True)
+        if title and len(title.strip()) > 10:
+            logger.info(f"title_from_h1 length={len(title)}")
+            return clean_title(title, url)
+    
+    # Try meta name="title"
+    meta_title = soup.find("meta", {"name": "title"})
+    if meta_title and meta_title.get("content"):
+        title = meta_title["content"]
+        if title and len(title.strip()) > 10:
+            logger.info(f"title_from_meta_title length={len(title)}")
+            return clean_title(title, url)
     
     # Fallback: extract from URL
-    if not title or len(title.strip()) < 3:
-        title = extract_title_from_url(url)
-    
+    title = extract_title_from_url(url)
     if title:
-        # Clean up title
-        title = title.strip()
-        # Remove site name suffixes (e.g., " - Reddit", " | GitHub")
-        title = re.split(r' [-|•:] ', title)[0]
-        title = title[:200]  # Cap length
+        logger.info(f"title_from_url_fallback length={len(title)}")
+    else:
+        logger.warning("title_extraction_failed all_methods_exhausted")
     
     return title
+
+
+def extract_reddit_title(soup: BeautifulSoup, url: str) -> str:
+    """
+    Extract title specifically from Reddit pages.
+    
+    Reddit uses dynamic rendering, so we need multiple strategies:
+    1. JSON-LD structured data
+    2. og:title meta tag
+    3. Specific Reddit HTML elements
+    4. URL fallback
+    """
+    # Strategy 1: Try JSON-LD data (most reliable when present)
+    json_ld = soup.find("script", {"type": "application/ld+json"})
+    if json_ld and json_ld.string:
+        try:
+            data = json.loads(json_ld.string)
+            if isinstance(data, dict):
+                title = data.get("headline") or data.get("name")
+                if title and len(title) > 10:
+                    return title
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        title = item.get("headline") or item.get("name")
+                        if title and len(title) > 10:
+                            return title
+        except (json.JSONDecodeError, TypeError):
+            pass
+    
+    # Strategy 2: og:title (usually reliable for Reddit)
+    og_title = soup.find("meta", property="og:title")
+    if og_title:
+        content = og_title.get("content", "")
+        if content and len(content) > 10:
+            # Reddit og:title sometimes has "r/subreddit - " prefix
+            content = re.sub(r'^r/\w+\s*[-:]\s*', '', content)
+            return content
+    
+    # Strategy 3: Reddit-specific elements (old and new Reddit)
+    # New Reddit: data-testid attributes
+    title_elem = soup.find(attrs={"data-testid": "post-title"})
+    if not title_elem:
+        title_elem = soup.find("h1", {"slot": "title"})
+    if not title_elem:
+        # Old Reddit: .title class
+        title_elem = soup.find("a", {"class": "title"})
+    if not title_elem:
+        title_elem = soup.find("p", {"class": "title"})
+    if not title_elem:
+        # Try any h1 with substantial content
+        for h1 in soup.find_all("h1"):
+            text = h1.get_text(strip=True)
+            if len(text) > 15 and not text.startswith("r/"):
+                title_elem = h1
+                break
+    
+    if title_elem:
+        title = title_elem.get_text(strip=True)
+        if len(title) > 10:
+            return title
+    
+    # Strategy 4: Title tag with cleanup
+    if soup.title and soup.title.string:
+        title = soup.title.string
+        # Reddit titles often have " : subreddit" or " - Reddit" suffix
+        title = re.sub(r'\s*[:\-|]\s*(r/\w+|Reddit).*$', '', title, flags=re.IGNORECASE)
+        if len(title) > 10:
+            return title
+    
+    # Strategy 5: URL fallback
+    url_title = extract_title_from_url(url)
+    if url_title and len(url_title) > 5:
+        return url_title
+    
+    return ""
+
+
+def clean_title(title: str, url: str) -> str:
+    """Clean up extracted title."""
+    if not title:
+        return ""
+    
+    title = title.strip()
+    
+    # Remove site name suffixes (e.g., " - Reddit", " | GitHub")
+    title = re.split(r'\s+[-|•:]\s+(?:Reddit|GitHub|Hacker News|HN|YouTube|Substack)', title, flags=re.IGNORECASE)[0]
+    
+    # Remove "r/subreddit - " prefix if present
+    title = re.sub(r'^r/\w+\s*[-:]\s*', '', title)
+    
+    # Cap length
+    title = title[:250]
+    
+    return title.strip()
 
 
 def extract_title_from_url(url: str) -> str:
     """
     Extract a fallback title from URL path.
     
+    ENHANCED: Better handling for Reddit URL structure.
+    
     Examples:
-        /r/programming/comments/xyz/my-post-title -> My Post Title
+        /r/programming/comments/xyz/my_post_title_here -> My Post Title Here
         /user/repo/issues/123 -> Issue 123
     """
     try:
-        # Reddit pattern
-        match = re.search(r'/comments/[\w]+/(.+?)(?:\?|/|$)', url)
+        # Reddit pattern - enhanced to handle various formats
+        # Format: /r/subreddit/comments/id/slug_title_here
+        match = re.search(r'/comments/[\w]+/([^/?]+)', url)
         if match:
-            title = match.group(1).replace('-', ' ').replace('_', ' ')
-            return title.title()
+            title = match.group(1)
+            # Handle URL encoding
+            title = requests.utils.unquote(title)
+            # Replace separators with spaces
+            title = title.replace('_', ' ').replace('-', ' ')
+            # Remove multiple spaces
+            title = ' '.join(title.split())
+            # Title case but keep acronyms
+            words = title.split()
+            titled_words = []
+            for word in words:
+                if word.isupper() and len(word) <= 5:
+                    titled_words.append(word)  # Keep acronyms like API, CSS
+                else:
+                    titled_words.append(word.capitalize())
+            title = ' '.join(titled_words)
+            
+            if len(title) > 5:
+                logger.info(f"title_from_reddit_url length={len(title)}")
+                return title
         
         # GitHub issues pattern
         match = re.search(r'/issues/(\d+)', url)
@@ -159,14 +311,23 @@ def extract_title_from_url(url: str) -> str:
         if match:
             return f"Pull Request #{match.group(1)}"
         
-        # Generic: take last path segment
+        # Hacker News pattern
+        match = re.search(r'news\.ycombinator\.com/item\?id=(\d+)', url)
+        if match:
+            return f"HN Discussion #{match.group(1)}"
+        
+        # Generic: take last meaningful path segment
         parts = url.rstrip('/').split('/')
-        if parts:
-            last_part = parts[-1].replace('-', ' ').replace('_', ' ')
-            if last_part and len(last_part) > 3:
-                return last_part.title()
+        for part in reversed(parts):
+            # Skip numeric-only parts and very short parts
+            if part and len(part) > 5 and not part.isdigit():
+                # Clean up
+                clean_part = part.replace('-', ' ').replace('_', ' ')
+                clean_part = requests.utils.unquote(clean_part)
+                if len(clean_part) > 5:
+                    return clean_part.title()
     
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"url_title_extraction_error error={type(e).__name__}")
     
     return ""

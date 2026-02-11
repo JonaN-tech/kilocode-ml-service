@@ -1,7 +1,12 @@
 import logging
+import re
 from fastapi import HTTPException
 from retrieval import search_by_name
-from generation.gemini_generator import generate_comment_with_gemini
+from generation.gemini_generator import (
+    generate_comment_with_gemini,
+    get_relevant_context_snippets,
+    KILOCODE_CONTEXT_PACK,
+)
 from generation.prompt_builder import detect_intent, detect_twitter_intent
 from text_utils import clean_text, chunk_text
 
@@ -52,10 +57,10 @@ def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="
         logger.info("embeddings_skipped=true reason=twitter_platform")
         return generate_twitter_comment(post, embedder, fetch_status)
     
-    # CRITICAL: Reddit NEVER uses embeddings (regardless of length)
+    # Reddit: Uses Gemini generation with static context (no embeddings, but not lightweight)
     if platform == "reddit":
-        logger.info(f"embeddings_disabled=reddit platform={platform} content_len={content_len}")
-        return generate_lightweight_comment(post, title, content)
+        logger.info(f"reddit_gemini_path platform={platform} content_len={content_len}")
+        return generate_reddit_comment(post, title, content)
     
     # GitHub with short content uses lightweight
     if platform == "github" and content_len < 1500:
@@ -73,42 +78,118 @@ def generate_comment(post, embedder, top_k_style=5, top_k_docs=5, fetch_status="
     return generate_lightweight_comment(post, title, content)
 
 
+def extract_subreddit(url: str) -> str:
+    """Extract subreddit name from Reddit URL."""
+    match = re.search(r'reddit\.com/r/([^/]+)', url)
+    return match.group(1) if match else ""
+
+
+def generate_reddit_comment(post, title: str, content: str):
+    """
+    Generate comment for Reddit using Gemini with static KiloCode context.
+    
+    This path:
+    - Does NOT use embeddings (RAM safe)
+    - DOES use static KiloCode context pack (specific, not generic)
+    - DOES pass subreddit for context
+    - Uses enhanced Gemini generator with model fallback
+    
+    This is the FIX for the regression where docs_used=0 produced generic comments.
+    """
+    logger.info(f"reddit_comment_path title_len={len(title)} content_len={len(content)}")
+    
+    if not title and not content:
+        return "Thanks for starting this discussion!"
+    
+    # Extract subreddit for context
+    subreddit = extract_subreddit(post.url) if hasattr(post, 'url') else ""
+    
+    # Get relevant KiloCode context snippets (static, no embeddings)
+    context_snippets = get_relevant_context_snippets(content, title, max_snippets=3)
+    context_snippet_ids = [s['id'] for s in context_snippets]
+    
+    logger.info(f"context_selected subreddit={subreddit} snippets={context_snippet_ids}")
+    
+    # Convert static snippets to doc_facts format for the generator
+    doc_facts = [
+        {"id": s['id'], "title": s['title'], "text": s['content'], "chunk_text": s['content']}
+        for s in context_snippets
+    ]
+    
+    try:
+        comment = generate_comment_with_gemini(
+            post_title=title,
+            post_content=content,
+            doc_facts=doc_facts,  # NOW includes context!
+            style_examples=[],
+            subreddit=subreddit,
+            max_retries=2
+        )
+        
+        # Enhanced diagnostic logging
+        sentence_count = len([s for s in re.split(r'[.!?]+', comment.strip()) if s.strip()])
+        kilocode_in_comment = "kilocode" in comment.lower()
+        
+        logger.info(
+            f"comment_generated "
+            f"platform={post.platform} "
+            f"subreddit={subreddit} "
+            f"comment_length={sentence_count}_sentences "
+            f"char_length={len(comment)} "
+            f"kilocode_injected={kilocode_in_comment} "
+            f"docs_used={len(doc_facts)} "
+            f"context_snippets={context_snippet_ids} "
+            f"embeddings_used=false "
+            f"generation=gemini"
+        )
+        
+        return comment
+        
+    except Exception as e:
+        logger.error(f"reddit_comment_failed error={type(e).__name__}: {str(e)[:100]}")
+        # Use enhanced fallback from gemini_generator (NOT generic)
+        from generation.gemini_generator import _generate_enhanced_fallback, _extract_key_points
+        key_points = _extract_key_points(title, content)
+        return _generate_enhanced_fallback(title, content, key_points, context_snippet_ids)
+
+
 def generate_lightweight_comment(post, title: str, content: str):
     """
     Generate comment using Gemini AI WITHOUT embeddings or vector retrieval.
     
-    This is the primary path for Reddit/GitHub on 512MB Render.
-    Uses Gemini's generative AI with strict quality constraints.
-    
-    CRITICAL: This now uses Gemini generation, not templates.
+    Only used for GitHub short content now. Reddit uses generate_reddit_comment.
     """
     logger.info(f"lightweight_comment_path title_len={len(title)} content_len={len(content)}")
     
     if not title and not content:
         return "Thanks for starting this discussion!"
     
-    # Use Gemini generator with empty retrieval context
+    # Get relevant KiloCode context snippets (static, no embeddings)
+    context_snippets = get_relevant_context_snippets(content, title, max_snippets=2)
+    doc_facts = [
+        {"id": s['id'], "title": s['title'], "text": s['content'], "chunk_text": s['content']}
+        for s in context_snippets
+    ]
+    
     try:
         comment = generate_comment_with_gemini(
             post_title=title,
             post_content=content,
-            doc_facts=[],  # No retrieval for lightweight path
+            doc_facts=doc_facts,
             style_examples=[],
             max_retries=1
         )
         
-        # Enhanced diagnostic logging
-        import re
         sentence_count = len([s for s in re.split(r'[.!?]+', comment.strip()) if s.strip()])
         kilocode_in_comment = "kilocode" in comment.lower()
         
         logger.info(
-            f"[ML] comment_generated "
+            f"comment_generated "
             f"platform={post.platform} "
-            f"comment_length={sentence_count} sentences "
+            f"comment_length={sentence_count}_sentences "
             f"char_length={len(comment)} "
             f"kilocode_injected={kilocode_in_comment} "
-            f"docs_used=0 "
+            f"docs_used={len(doc_facts)} "
             f"embeddings_used=false "
             f"generation=gemini"
         )
@@ -116,16 +197,10 @@ def generate_lightweight_comment(post, title: str, content: str):
         return comment
     except Exception as e:
         logger.error(f"lightweight_comment_failed error={type(e).__name__}")
-        # Emergency fallback
-        topic_words = (title + " " + content).split()
-        meaningful = [w for w in topic_words if len(w) > 5][:2]
-        topic = " and ".join(meaningful) if meaningful else "this"
-        
-        return (
-            f"The challenge with {topic} is definitely worth exploring. "
-            f"KiloCode can help analyze these kinds of problems systematically "
-            f"and suggest solutions based on similar patterns."
-        )
+        from generation.gemini_generator import _generate_enhanced_fallback, _extract_key_points
+        key_points = _extract_key_points(title, content)
+        context_ids = [s['id'] for s in context_snippets]
+        return _generate_enhanced_fallback(title, content, key_points, context_ids)
 
 
 def generate_twitter_comment(post, embedder, fetch_status):
