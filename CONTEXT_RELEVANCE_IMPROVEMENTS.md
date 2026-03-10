@@ -6,79 +6,103 @@ This document describes improvements made to the Reddit comment generation syste
 
 ## Problem Statement
 
-Previously, generated comments could be too generic and didn't always reference specific entities mentioned in the original post. Comments like "Interesting discussion" or "Thanks for sharing" don't add value to the conversation.
+Previously, generated comments could be too generic and didn't always reference specific entities mentioned in the original post. Comments like "Interesting discussion" or "Thanks for sharing" don't add value and don't respond to the post. Even when comments sounded natural, they sometimes lost contextual grounding - they could apply to any post, not specifically the one being replied to.
 
 ## Solution
 
-### 1. Entity Extraction System
+### 1. Context Extraction Step (NEW)
 
-Added a comprehensive entity extraction system in [`generation/gemini_generator.py`](generation/gemini_generator.py:255) that identifies:
-
-#### AI Models
-- Opus, Sonnet, Haiku, Claude
-- GPT-4, GPT-4o, GPT-3.5, GPT
-- Kimi, MiniMax, Gemini
-- Llama, Mistral, Codestral, DeepSeek
-- O1, O1-preview, O1-mini
-- Cursor, Aider, Copilot, Codex
-
-#### Developer Tools
-- Editors: VSCode, Vim, Neovim, Emacs, JetBrains
-- Infrastructure: Docker, Kubernetes, Terraform, Ansible
-- Languages: Python, JavaScript, TypeScript, Rust, Go, Java
-- Frameworks: React, Vue, Angular, Svelte, Next.js
-- Databases: PostgreSQL, MySQL, MongoDB, Redis
-- Cloud: AWS, Azure, GCP, Vercel, Netlify, Heroku
-
-#### Workflows/Approaches
-- TDD, BDD, CI/CD, DevOps
-- Microservices, Serverless, MVC
-- Refactoring, Testing, Debugging, Profiling
-
-### 2. Enhanced System Prompt
-
-Updated [`_build_system_prompt()`](generation/gemini_generator.py:438) with:
-
-- **Context Relevance Rules**: Explicit instructions to reference specific entities
-- **Entity-Specific Examples**: Good examples showing how to reference Opus, Sonnet, Docker, etc.
-- **Forbidden Generic Phrases**: Added "Great question" and "Good point" without specific context
-
-### 3. Enhanced User Prompt
-
-Updated [`_build_user_prompt()`](generation/gemini_generator.py:509) with:
-
-- **Entities Section**: New section that lists all detected entities
-- **Explicit Reference Instructions**: Warning that comments MUST mention 1-2 entities by name
-- **Dynamic Task Instructions**: Task instructions now include specific entity names
-
-### 4. Enhanced Fallback Generator
-
-Updated [`_generate_enhanced_fallback()`](generation/gemini_generator.py:834) to:
-
-- Use extracted entities (models, tools, workflows) as primary entity references
-- Format entity names correctly (uppercase for OPUS, SONNET, etc.)
-- Include entity type detection for more contextual responses
-
-## Code Changes
-
-### New Functions
+Added a comprehensive [`extract_post_context()`](generation/gemini_generator.py:392) function that performs structured analysis of each post BEFORE generating a comment:
 
 ```python
-def _extract_specific_entities(post_title: str, post_content: str) -> Dict[str, List[str]]:
-    """
-    Extract specific entities mentioned in the post for context relevance.
-    
-    Returns:
-        Dict with keys: 'models', 'tools', 'workflows', 'technologies', 'problems'
-    """
+context = extract_post_context(post_title, post_content)
+# Returns:
+# {
+#   "entities": { models, tools, workflows, problems },
+#   "main_topic": "Plan vs Build models in coding workflows",
+#   "main_question": "What's the best model pair?",
+#   "discussion_type": "workflow_planning",
+#   "context_elements": ["model:Opus", "workflow:plan vs build", ...]
+# }
 ```
 
-### Modified Functions
+This context object is passed through the entire generation pipeline and used for:
+- Building the user prompt (tells Gemini exactly what to reference)
+- Validating the output (checks that the comment references specific entities)
+- Enhanced fallback generation (produces context-aware fallbacks)
 
-1. **`_extract_key_points()`** - Now includes extracted entities as the first key points
-2. **`_build_system_prompt()`** - Added context relevance rules and entity-specific examples
-3. **`_build_user_prompt()`** - Added entities section with explicit reference instructions
-4. **`_generate_enhanced_fallback()`** - Uses extracted entities for contextual responses
+### 2. Enhanced Entity Extraction
+
+Updated [`_extract_specific_entities()`](generation/gemini_generator.py:293) with:
+
+#### Versioned AI Models (NEW)
+- **Pattern-based extraction**: Detects "Opus 4.6", "Kimi K2.5", "MiniMax M2.5", "GPT-4o", etc.
+- **Display names preserved**: Stores original-case versions (e.g., "Opus 4.6" not "opus 4.6") for more natural prompt text
+- **Deduplication**: Versioned models take priority over base name matching
+
+#### Expanded Model List
+- Added: o3, o3-mini, o4-mini, grok
+
+#### Expanded Tool List
+- Added: kilocode, windsurf, bolt, lovable, v0
+
+#### Multi-word Workflow Phrases (NEW)
+- Matches compound phrases FIRST: "plan vs build", "plan mode", "build mode", "multi-agent setup", "coding workflow", "model pairing", "vibe coding", "token usage", etc.
+- Single keywords are only added if not already part of a matched phrase
+
+#### AI Coding Workflow Keywords (NEW)
+- Added: "plan vs build", "planning model", "implementation model", "multi-agent", "agentic", "coding workflow", "vibe coding", "prompt engineering", "model switching", "code generation", "context window", etc.
+
+### 3. Discussion Type Classification (NEW)
+
+Added [`_classify_discussion_type()`](generation/gemini_generator.py:447) that categorizes posts into:
+- `comparison` - "Opus vs Sonnet", "X compared to Y"
+- `workflow_planning` - "plan vs build", "planning model"
+- `workflow` - general workflow discussions
+- `model_comparison` - posts mentioning 2+ models
+- `model_discussion` - posts about a specific model
+- `help_request` - posts with errors/issues/problems
+- `experience` - "I've been using...", "my experience with..."
+- `recommendation` - "best...", "what do you recommend"
+- `question` - general questions
+- `general` - everything else
+
+### 4. Stronger Context Grounding in Prompts
+
+#### System Prompt ([`_build_system_prompt()`](generation/gemini_generator.py:737))
+- **New top-level rule**: "A reader should be able to tell EXACTLY what post you're replying to just from reading your comment"
+- Added examples matching task requirements (plan vs build, model pairs)
+- Added more forbidden phrases: "That's a great question", "Great question", "Good point", "Thanks for starting this thread"
+- Explicit instruction: "If a comment could apply to ANY random post, it will be REJECTED"
+
+#### User Prompt ([`_build_user_prompt()`](generation/gemini_generator.py:828))
+- **New CONTEXT ANALYSIS section**: Includes topic summary, discussion type, and main question
+- **Entities section with display names**: Shows "Opus 4.6" not "opus 4.6"
+- **Dynamic task instructions**: Reference specific entities by name in the instruction text
+- **Stronger retry prompts**: Include the specific entities the comment MUST reference
+- Added KiloCode capability description: "VS Code extension that lets you switch between different AI models mid-workflow"
+
+### 5. Enhanced Quality Validation
+
+Updated [`_validate_comment_quality()`](generation/gemini_generator.py:626) with:
+- **Entity reference checking**: Validates that the comment actually mentions entities found in the post
+- **Reject on zero entity references**: If the post mentions models/tools/workflows and the comment doesn't reference any, it's rejected
+- **Adaptive overlap requirements**: If entity references are strong (2+), word overlap threshold is relaxed
+- **Extended common words filter**: More words excluded from overlap counting for accuracy
+
+### 6. Discussion-Aware Fallback Generator
+
+Updated [`_generate_enhanced_fallback()`](generation/gemini_generator.py:1180) with:
+- **Discussion type awareness**: Different templates for comparison, workflow_planning, model_comparison, etc.
+- **Discussion-specific KiloCode recommendations**: e.g., for comparisons: "lets you switch between models mid-workflow"
+- **Display names**: Uses original-case entity names
+- **Secondary entity support**: References 2 models when a comparison is detected
+
+### 7. Pipeline Integration
+
+Updated [`comment_engine.py`](comment_engine.py:87) to:
+- Import and call `extract_post_context()` before generation
+- Log extracted context details (discussion type, models, workflows, topic)
 
 ## Quality Guardrails
 
@@ -88,8 +112,10 @@ def _extract_specific_entities(post_title: str, post_content: str) -> Dict[str, 
 - "Great post"
 - "Nice thread"
 - "Good topic"
-- "Great question" (without specific context)
-- "Good point" (without specific context)
+- "That's a great question" (NEW)
+- "Great question" (NEW)
+- "Good point" (NEW)
+- "Thanks for starting"
 
 ### Generic Phrases (Rejected by Quality Check)
 - "many developers encounter"
@@ -99,40 +125,69 @@ def _extract_specific_entities(post_title: str, post_content: str) -> Dict[str, 
 - "optimize workflow"
 - "seamless integration"
 
+### Entity Reference Requirement (NEW)
+- If the post mentions models/tools/workflows, the comment MUST reference at least 1 by name
+- Comments with zero entity references are rejected and retried
+
 ## Example Outputs
 
 ### Before (Generic)
 > "This is something many developers encounter. KiloCode can help analyze the problem systematically."
 
 ### After (Context-Aware)
-> "Honestly both Opus and Sonnet are pretty solid for coding tasks, but Opus tends to handle more complex refactoring better. Might be worth running your codebase through KiloCode to see which model catches more issues in your specific setup."
+> "Yeah switching models between plan and build like that can sometimes double token usage. If you're worried about the build phase getting expensive, might be worth running it through KiloCode to see if it's generating overly verbose code."
 
 ### Before (Generic)
-> "Thanks for sharing this interesting discussion about Docker."
+> "Great question."
 
 ### After (Context-Aware)
-> "Docker networking can be a pain to debug tbh. Might be worth running KiloCode on your compose file and seeing if it spots any config issues with the container setup."
+> "Opus tends to be really solid for planning. For the implementation step I've also seen good results with Kimi or MiniMax. Running the whole workflow through KiloCode can make that easier since you can switch models without changing editors."
 
 ## Testing
 
-A test file [`test_context_relevance.py`](test_context_relevance.py) was created to verify:
+The test file [`test_context_relevance.py`](test_context_relevance.py) covers:
 
-1. Entity extraction works correctly for models, tools, workflows
-2. Key points include extracted entities
-3. Fallback comments reference specific entities
-4. No generic or forbidden phrases are generated
+1. **Entity extraction** - models, versioned models, tools, workflow phrases, problems
+2. **Post context extraction** - full `extract_post_context()` pipeline
+3. **Discussion type classification** - comparison, workflow_planning, help_request, etc.
+4. **Main question extraction** - finding the key question in a post
+5. **Key points extraction** - with display names and workflow phrases
+6. **Enhanced fallback** - context-aware fallback with discussion type
+7. **No generic phrases** - guardrail validation
+8. **No forbidden phrases** - strict prohibition validation
+9. **Quality validation entity refs** - entity reference checking in validation
+10. **Context elements building** - prioritized context element list
 
 ## Files Modified
 
-1. [`generation/gemini_generator.py`](generation/gemini_generator.py) - Main changes to entity extraction and prompt building
+1. [`generation/gemini_generator.py`](generation/gemini_generator.py) - Core changes: context extraction, entity detection, prompts, validation, fallback
+2. [`comment_engine.py`](comment_engine.py) - Pipeline integration: imports `extract_post_context`, logs context
+3. [`test_context_relevance.py`](test_context_relevance.py) - Expanded test suite
 
-## Files Created
+## New Functions
 
-1. [`test_context_relevance.py`](test_context_relevance.py) - Test suite for context relevance improvements
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `extract_post_context()` | gemini_generator.py:392 | Comprehensive context extraction step |
+| `_classify_discussion_type()` | gemini_generator.py:447 | Classify post discussion type |
+| `_extract_main_question()` | gemini_generator.py:487 | Extract main question from post |
+| `_summarize_topic()` | gemini_generator.py:506 | Create topic summary |
+| `_build_context_elements()` | gemini_generator.py:528 | Build prioritized context elements list |
+
+## New Constants
+
+| Constant | Purpose |
+|----------|---------|
+| `VERSIONED_MODEL_PATTERNS` | Regex patterns for versioned model names |
+| `WORKFLOW_PHRASES` | Multi-word workflow phrases |
+| `WORKFLOW_KEYWORDS` (expanded) | AI coding workflow keywords |
 
 ## Benefits
 
-1. **Higher Relevance**: Comments now directly reference the specific technologies, models, and tools mentioned in posts
-2. **Better Engagement**: Natural, developer-to-developer tone that fits Reddit culture
-3. **No Generic Content**: Quality guardrails prevent generic, low-value comments
-4. **Entity Awareness**: System recognizes and references AI models, tools, and workflows commonly discussed in developer communities
+1. **Contextual Grounding**: Comments now demonstrably respond to the specific post topic
+2. **Entity References**: Comments reference specific models, tools, and workflows by name
+3. **Discussion Awareness**: System understands whether a post is a comparison, help request, workflow discussion, etc.
+4. **Versioned Model Support**: Correctly handles "Opus 4.6", "Kimi K2.5", "MiniMax M2.5"
+5. **Workflow Phrase Matching**: Detects compound concepts like "plan vs build" and "multi-agent setup"
+6. **No Generic Content**: Multiple guardrails prevent generic, low-value comments
+7. **Stronger Validation**: Entity reference checking ensures the comment actually addresses the post

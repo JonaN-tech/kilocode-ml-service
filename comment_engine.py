@@ -5,6 +5,7 @@ from retrieval import search_by_name
 from generation.gemini_generator import (
     generate_comment_with_gemini,
     get_relevant_context_snippets,
+    extract_post_context,
     KILOCODE_CONTEXT_PACK,
 )
 from generation.prompt_builder import detect_intent, detect_twitter_intent
@@ -90,6 +91,7 @@ def generate_reddit_comment(post, title: str, content: str):
     
     This path:
     - Does NOT use embeddings (RAM safe)
+    - DOES extract post context BEFORE generation (context relevance step)
     - DOES use static KiloCode context pack (specific, not generic)
     - DOES pass subreddit for context
     - Uses enhanced Gemini generator with model fallback
@@ -100,6 +102,16 @@ def generate_reddit_comment(post, title: str, content: str):
     
     if not title and not content:
         return "Thanks for starting this discussion!"
+    
+    # STEP 1: Extract post context BEFORE generation
+    post_context = extract_post_context(title, content)
+    logger.info(
+        f"reddit_context_extracted "
+        f"discussion_type={post_context['discussion_type']} "
+        f"models={post_context['entities']['models'][:3]} "
+        f"workflows={post_context['entities']['workflows'][:3]} "
+        f"topic={post_context['main_topic'][:60]}"
+    )
     
     # Extract subreddit for context
     subreddit = extract_subreddit(post.url) if hasattr(post, 'url') else ""
@@ -120,7 +132,7 @@ def generate_reddit_comment(post, title: str, content: str):
         comment = generate_comment_with_gemini(
             post_title=title,
             post_content=content,
-            doc_facts=doc_facts,  # NOW includes context!
+            doc_facts=doc_facts,
             style_examples=[],
             subreddit=subreddit,
             max_retries=2
